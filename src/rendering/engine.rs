@@ -1,5 +1,5 @@
 use crate::rendering::*;
-use crate::tilemap::Tilemap;
+use crate::tilemap::{get_tile_index, Tilemap};
 use crate::transform::Transform;
 use crate::world::*;
 use crate::*;
@@ -169,13 +169,13 @@ impl RenderingEngine {
         let cmd_adder = DrawCommandAdder::new(self, world);
 
         #[cfg(feature = "aseprite")]
-        cmd_adder.add_draw_commands::<Aseprite>(&mut draw_queue, world, asset_store);
+        cmd_adder.add_draw_commands::<Aseprite>(&mut draw_queue, world, asset_store)?;
 
-        cmd_adder.add_draw_commands::<Tilemap>(&mut draw_queue, world, asset_store);
-        cmd_adder.add_draw_commands::<Sprite>(&mut draw_queue, world, asset_store);
-        cmd_adder.add_draw_commands::<UIButton>(&mut draw_queue, world, asset_store);
-        cmd_adder.add_draw_commands::<ColorRect>(&mut draw_queue, world, asset_store);
-        cmd_adder.add_draw_commands::<Label>(&mut draw_queue, world, asset_store);
+        cmd_adder.add_draw_commands::<Tilemap>(&mut draw_queue, world, asset_store)?;
+        cmd_adder.add_draw_commands::<Sprite>(&mut draw_queue, world, asset_store)?;
+        cmd_adder.add_draw_commands::<UIButton>(&mut draw_queue, world, asset_store)?;
+        cmd_adder.add_draw_commands::<ColorRect>(&mut draw_queue, world, asset_store)?;
+        cmd_adder.add_draw_commands::<Label>(&mut draw_queue, world, asset_store)?;
 
         draw_queue.sort_by(|a, b| a.z_index.partial_cmp(&b.z_index).unwrap());
 
@@ -933,7 +933,7 @@ trait ToDrawable {
         asset_store: &mut AssetStore,
     ) -> Option<Rectangle>;
 
-    fn to_drawable(&self) -> Drawable;
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError>;
 
     fn z_index(&self) -> f32;
 }
@@ -956,26 +956,31 @@ impl ToDrawable for Tilemap {
         Some(visible_bounds)
     }
 
-    fn to_drawable(&self) -> Drawable {
-        Drawable::Tilemap {
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError> {
+        let width = self.width();
+        let height = self.height();
+        let tiles: Result<Vec<isize>, EmeraldError> = self
+            .tiles
+            .iter()
+            .map(|tile| {
+                if let Some(tile_id) = tile {
+                    let index = get_tile_index(tile_id.0, tile_id.1, width, height)?;
+                    Ok(index as isize)
+                } else {
+                    Ok(-1)
+                }
+            })
+            .collect();
+
+        Ok(Drawable::Tilemap {
             texture_key: self.tilesheet.clone(),
-            tiles: self
-                .tiles
-                .iter()
-                .map(|tile| {
-                    if let Some(tile_id) = tile {
-                        *tile_id as isize
-                    } else {
-                        -1
-                    }
-                })
-                .collect(),
+            tiles: tiles?,
             width: self.width,
             height: self.height,
             z_index: self.z_index,
             visible: self.visible,
             tile_size: self.tile_size.clone(),
-        }
+        })
     }
 
     fn z_index(&self) -> f32 {
@@ -993,8 +998,8 @@ impl ToDrawable for Aseprite {
         self.get_sprite().get_visible_bounds(transform, asset_store)
     }
 
-    fn to_drawable(&self) -> Drawable {
-        Drawable::Aseprite {
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError> {
+        Ok(Drawable::Aseprite {
             sprite: self.get_sprite().clone(),
             offset: self.offset,
             scale: self.scale,
@@ -1003,7 +1008,7 @@ impl ToDrawable for Aseprite {
             rotation: self.rotation,
             z_index: self.z_index,
             visible: self.visible,
-        }
+        })
     }
 
     fn z_index(&self) -> f32 {
@@ -1042,10 +1047,10 @@ impl ToDrawable for Sprite {
         Some(bounds)
     }
 
-    fn to_drawable(&self) -> Drawable {
-        Drawable::Sprite {
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError> {
+        Ok(Drawable::Sprite {
             sprite: self.clone(),
-        }
+        })
     }
 
     fn z_index(&self) -> f32 {
@@ -1063,11 +1068,11 @@ impl ToDrawable for UIButton {
         sprite.get_visible_bounds(transform, asset_store)
     }
 
-    fn to_drawable(&self) -> Drawable {
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError> {
         let mut sprite = Sprite::from_texture(self.current_texture().clone());
         sprite.visible = self.visible;
 
-        Drawable::Sprite { sprite }
+        Ok(Drawable::Sprite { sprite })
     }
 
     fn z_index(&self) -> f32 {
@@ -1094,8 +1099,8 @@ impl ToDrawable for ColorRect {
         Some(bounds)
     }
 
-    fn to_drawable(&self) -> Drawable {
-        Drawable::ColorRect { color_rect: *self }
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError> {
+        Ok(Drawable::ColorRect { color_rect: *self })
     }
 
     fn z_index(&self) -> f32 {
@@ -1112,10 +1117,10 @@ impl ToDrawable for Label {
         None
     }
 
-    fn to_drawable(&self) -> Drawable {
-        Drawable::Label {
+    fn to_drawable(&self) -> Result<Drawable, EmeraldError> {
+        Ok(Drawable::Label {
             label: self.clone(),
-        }
+        })
     }
 
     fn z_index(&self) -> f32 {
@@ -1167,34 +1172,38 @@ impl DrawCommandAdder {
         draw_queue: &mut Vec<DrawCommand>,
         world: &'a World,
         asset_store: &mut AssetStore,
-    ) where
+    ) -> Result<(), EmeraldError>
+    where
         D: hecs::Component + ToDrawable + 'a,
     {
-        draw_queue.extend(
-            world
-                .query::<(&D, &Transform)>()
-                .into_iter()
-                .filter(|(_entity, (to_drawable, transform))| {
-                    if let Some(camera_bounds) = self.camera_bounds {
-                        if let Some(drawable_bounds) =
-                            to_drawable.get_visible_bounds(transform, asset_store)
-                        {
-                            return camera_bounds.intersects_with(&drawable_bounds);
-                        }
+        let commands: Result<Vec<DrawCommand>, EmeraldError> = world
+            .query::<(&D, &Transform)>()
+            .into_iter()
+            .filter(|(_entity, (to_drawable, transform))| {
+                if let Some(camera_bounds) = self.camera_bounds {
+                    if let Some(drawable_bounds) =
+                        to_drawable.get_visible_bounds(transform, asset_store)
+                    {
+                        return camera_bounds.intersects_with(&drawable_bounds);
                     }
+                }
 
-                    true
+                true
+            })
+            .map(|(_entity, (to_drawable, transform))| {
+                let drawable = to_drawable.to_drawable()?;
+
+                Ok(DrawCommand {
+                    drawable,
+                    transform: *transform,
+                    z_index: to_drawable.z_index(),
                 })
-                .map(|(_entity, (to_drawable, transform))| {
-                    let drawable = to_drawable.to_drawable();
+            })
+            .collect();
 
-                    DrawCommand {
-                        drawable,
-                        transform: *transform,
-                        z_index: to_drawable.z_index(),
-                    }
-                }),
-        );
+        draw_queue.extend(commands?);
+
+        Ok(())
     }
 }
 
